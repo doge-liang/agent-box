@@ -1,6 +1,8 @@
-# ag-box —— agent 工作沙盒
+# ag-box —— 跨节点 AI coding agent 工作沙盒
 
-> 状态(2026-07-16):设计、实现、真机验收均已完成。跨机 park/up 续聊、租约拦截、`.auth-secret` 铁律排除、断电韧性、增量快照、`box-snapshot.timer`/`box-prune.timer` 定时器——以上六项在 term1↔term2 两节点真实环境端到端验收通过(2026-07-16)。本文档描述的是两节点实测跑通的行为,不是纸面设计。
+ag-box 给在多台机器(VPS、物理机)上使用 Claude Code / Codex / Grok 等 AI coding agent 的人提供一个可跨节点归档/拉起的项目工作沙盒:项目文件和 agent 会话记忆随迁移带走,换一台机器接着聊,不丢上下文。不依赖 KVM/嵌套虚拟化,裸机双节点即可跑起来——隔离靠 bwrap + systemd-run,跨节点数据搬运靠 restic 增量快照到 Cloudflare R2。
+
+> 状态(2026-07-16):设计、实现、真机验收均已完成。跨机 park/up 续聊、租约拦截、`.auth-secret` 铁律排除、断电韧性、增量快照、`box-snapshot.timer`/`box-prune.timer` 定时器——以上六项在双节点真实环境端到端验收通过(2026-07-16)。本文档描述的是实测跑通的行为,不是纸面设计。
 
 ## 1. 是什么
 
@@ -13,14 +15,14 @@ ag-box 是给 AI coding agent(Claude Code / Codex / Grok)准备的 per-project �
 | 数据版本/迁移 | restic → Cloudflare R2 | 项目目录 + 会话记忆快照,meta.json 记租约 |
 | 代码版本 | git(原有,不变) | 项目源码本身 |
 
-一个活跃沙盒 = 一个 systemd transient service 包住的一棵 bwrap 进程树,锚进程是盒内自己的 tmux server(`tmux -S /run/box/<名>/tmux.sock`)。`ag-box attach` 只是宿主上一句 `tmux attach` 连进那个 socket,盒内 `/tmp` 是私有 tmpfs——这就是 2026-07-13 "grok agent `rm -rf /tmp/*` 删掉宿主 tmux socket" 那类事故的免疫机制。
+一个活跃沙盒 = 一个 systemd transient service 包住的一棵 bwrap 进程树,锚进程是盒内自己的 tmux server(`tmux -S /run/box/<名>/tmux.sock`)。`ag-box attach` 只是宿主上一句 `tmux attach` 连进那个 socket,盒内 `/tmp` 是私有 tmpfs——盒内 agent 哪怕跑出 `rm -rf /tmp/*` 之类的误操作,波及的也只是盒内私有的 tmpfs,连不到宿主的 tmux socket。
 
 ## 2. 安装
 
-两节点各跑一次:
+每个节点各跑一次:
 
 ```bash
-bash install.sh                       # 装本机(例如 term1)
+bash install.sh                       # 装本机
 bash install.sh --to my-second-node   # 打包推到另一节点(ssh 别名)并远程安装
 ```
 
@@ -32,17 +34,17 @@ bash install.sh --to my-second-node   # 打包推到另一节点(ssh 别名)并�
 
 box 的挂载策略把宿主 `/usr /lib /lib64 /bin /sbin /etc /nix` 只读绑进盒内(见"安全边界"挂载清单),**没有单独给盒装一份 agent CLI**——盒内能跑哪些 agent,取决于宿主上已经装了哪些。这是设计文档"宿主预装统一工具链"这条假设的落地要求,不是遗漏。
 
-新节点(例如新加一台 term2 类型的机器)接入 ag-box 集群前,必须先在**宿主**上装齐要用的 agent CLI,版本建议与主节点对齐:
+新节点接入 ag-box 集群前,必须先在**宿主**上装齐要用的 agent CLI,版本建议与已有节点对齐:
 
-- Claude Code:`npm install -g @anthropic-ai/claude-code@<版本>`(验收时 term1 与 term2 对齐装的是 `2.1.211`)。
+- Claude Code:`npm install -g @anthropic-ai/claude-code@<版本>`(各节点版本保持一致;验收时装的是 `2.1.211`)。
 - Codex / Grok:各自官方安装方式装到宿主 PATH 上(与 Claude Code 同理,盒内直接复用宿主二进制,不单独在盒里装)。
 
 不做这一步的后果:跨机 `ag-box up` 会把会话数据(`~/.claude/projects/<slug>/`、`.codex`/`.grok` 会话)正常迁移过去,但新节点盒内敲 `claude`/`codex`/`grok` 会 `command not found`——**数据已经在,只是运行时没装**,容易被误判成迁移失败。装好对应 CLI 后无需重新 track,直接 `attach` 即可用。
 
 配置文件(每节点各一份,`chmod 600`,不入仓,模板已在 `/opt/box/`):
 
-- `/root/.config/box/env` —— 参照 `env.example`:`BOX_NODE`(本机节点名)、`BOX_GLOBALS_ROLE`(term1 填 `push`,其余节点填 `pull`)、`BOX_S3_ENDPOINT`/`BOX_BUCKET`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`(R2)、`RESTIC_PASSWORD`、`BOX_MEMORY_MAX`(本节点单盒默认内存上限,按盒可在 meta.json 覆盖)。
-- `/root/.config/box/nodes` —— 参照 `nodes.example`:每行「节点名 ssh 别名」,本机那行写 `local`。两节点各一份、内容不同(各自视角):term1 的文件里 term2 那行是 ssh 别名,term2 的文件里 term1 那行是 ssh 别名。
+- `/root/.config/box/env` —— 参照 `env.example`:`BOX_NODE`(本机节点名,自定义)、`BOX_GLOBALS_ROLE`(集群里固定选一台**主节点**填 `push`,其余节点填 `pull`,见下文"globals 单向流")、`BOX_S3_ENDPOINT`/`BOX_BUCKET`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`(R2)、`RESTIC_PASSWORD`、`BOX_MEMORY_MAX`(本节点单盒默认内存上限,按盒可在 meta.json 覆盖)。
+- `/root/.config/box/nodes` —— 参照 `nodes.example`:每行「节点名 ssh 别名」,节点名由你自定义(如 `node-a`/`node-b`,或任意你喜欢的名字),本机那行写 `local`。每个节点各一份、内容不同(各自视角):以两节点 `node-a`/`node-b` 为例,`node-a` 的文件里 `node-b` 那行是 ssh 别名,`node-b` 的文件里 `node-a` 那行是 ssh 别名;节点更多时以此类推,每份文件里其余各节点那行都是对应的 ssh 别名。
 
 **R2 凭证获取步骤**:
 
@@ -88,7 +90,7 @@ ssh -t my-second-node ag-box attach myproj   # 接入,agent 里 --resume 续上�
 
 ## 4. 铁律
 
-- **`.auth-secret` 永不入快照**:`exclude.txt` 里排除;`ag-box track` 检测到项目目录里有 `.auth-secret` 会自动把该盒 `pin` 到当前节点——mobile-terminal-web 就是这种场景(term2 同路径是生产部署的 tar 同步副本),防止被调度到别的节点覆盖生产。
+- **`.auth-secret` 永不入快照**:`exclude.txt` 里排除;`ag-box track` 检测到项目目录里有 `.auth-secret` 会自动把该盒 `pin` 到当前节点。适用场景:某个项目目录里有一个**每节点必须不同**的密钥文件(例如各节点独立签发的 HMAC 签名密钥),把它命名为 `.auth-secret`,ag-box 就既不会把它同步进快照泄漏到其它节点,也不会把这个沙盒调度过去、覆盖掉那台机器上的专属密钥。
 - **改了 `exclude.txt` 之后必须重跑 `install.sh`**(本机以及 `--to <节点>` 远程都要跑):`lib/snapshot.js` 里 `EXCLUDE_FILE` 优先读 `/opt/exclude.txt`(已安装副本),不会跟着仓库文件自动更新——只改仓库不重装,铁律排除会静默滞后,`.auth-secret` 之类的规则可能实际没生效。
 
 ## 5. 安全边界(诚实声明)
@@ -110,21 +112,21 @@ ssh -t my-second-node ag-box attach myproj   # 接入,agent 里 --resume 续上�
 ## 6. 已知边界
 
 - **进程不迁移**:park/up 迁移的是文件和会话上下文,不是运行中的进程——`park` 时盒内正在跑的命令会被终止,agent 靠 `--resume` 之类机制在新节点接上下文,不是断点续行。
-- **嵌套 tmux**:从网页终端 attach(其本身就跑在宿主 tmux 里)再 `ag-box attach` 进盒,会出现 tmux 套 tmux;盒内层用绿色状态栏(`tmux-inner.conf`,`[box:<hostname>]`)做视觉区分,不是消除嵌套。
+- **嵌套 tmux**:如果连接宿主时本身已经在一个 tmux 会话里(例如通过某种终端前端,其连接方式本身就跑在宿主 tmux 里),再 `ag-box attach` 进盒,会出现 tmux 套 tmux;盒内层用绿色状态栏(`tmux-inner.conf`,`[box:<hostname>]`)做视觉区分,不是消除嵌套。
 - **grok 全局索引不迁移**:`~/.grok/session_search.sqlite` 这类全局索引文件不在会话切片范围内(`lib/sessions.js` 只按目录名解码出的 cwd 匹配单个项目的会话),不随快照迁移。
-- **globals 单向流**:`ag-box globals push/pull` 不做双向合并——防止两机同时刷新 OAuth refresh token 互相顶掉。约定 term1 push、其余节点 pull(`box-snapshot.timer` 每小时按 `BOX_GLOBALS_ROLE` 自动跑 `globals auto`)。**push 节点(term1)是凭证的真相源**:`push`=`restic backup`(本机盘→R2),`pull`=`restic restore latest`(R2→本机盘),二者不对称——pull 节点执行 `push` 只是把自己的文件当新快照传到 R2,并不会写回 term1 的本地盘,而 term1 下一轮定时任务仍会用它盘上的旧凭证 `push` 出新快照,把刚才传上去的覆盖掉;pull 节点因为角色是 pull,也永远不会主动把这份新快照拉回自己。因此在非 term1 节点重新登录了某个 agent(刷新了它的 auth)后,正确恢复流程二选一:**要么直接在 term1 上重新登录该 agent**(凭证直接落在真相源上);**要么该节点 `ag-box globals push` 之后,登录 term1 手动跑一次 `ag-box globals pull`**,让 term1 盘拿到这份新凭证,下一轮它的定时 `push` 才会把新凭证保持在 R2 上,而不是被旧凭证覆盖回去。
+- **globals 单向流**:`ag-box globals push/pull` 不做双向合并——防止多机同时刷新 OAuth refresh token 互相顶掉。约定集群里固定一台**主节点(push 角色)**、其余节点都是 **pull 角色**(`box-snapshot.timer` 每小时按各自 `BOX_GLOBALS_ROLE` 自动跑 `globals auto`)。**主节点是凭证的真相源**:`push`=`restic backup`(本机盘→R2),`pull`=`restic restore latest`(R2→本机盘),二者不对称——pull 节点执行 `push` 只是把自己的文件当新快照传到 R2,并不会写回主节点的本地盘,而主节点下一轮定时任务仍会用它盘上的旧凭证 `push` 出新快照,把刚才传上去的覆盖掉;pull 节点因为角色是 pull,也永远不会主动把这份新快照拉回自己。因此在非主节点上重新登录了某个 agent(刷新了它的 auth)后,正确恢复流程二选一:**要么直接在主节点上重新登录该 agent**(凭证直接落在真相源上);**要么该节点 `ag-box globals push` 之后,登录主节点手动跑一次 `ag-box globals pull`**,让主节点盘拿到这份新凭证,下一轮它的定时 `push` 才会把新凭证保持在 R2 上,而不是被旧凭证覆盖回去。
 - **定时快照的完整行为**:`box-snapshot.timer`(`OnCalendar=hourly`)触发 `box-snapshot.service`,依次执行两条 `ExecStart`:`ag-box snapshot --active`(本机当前持有租约的全部活跃盒各打一次快照并续租)、再 `ag-box globals auto`(按本机 `BOX_GLOBALS_ROLE` push 或 pull)。两条 `ExecStart` 均未加 `-` 前缀,是标准 `Type=oneshot` 语义——**前一步真失败(非零退出)会阻断第二步、globals 同步会被跳过、unit 标记 failed**。正因如此,"本机没有活跃盒"这种每小时都会遇到的正常情况必须让 `ag-box snapshot --active` 走成功退出(0),不能算失败:活跃盒列表为空时打印"本机无活跃盒,跳过快照"并正常返回,globals 同步才能照常跑到。
 - **`ag-box exec` 的 PATH 与 `attach` 不完全一致**:`exec`(`lib/runtime.js` 的 `execIn`)走 `nsenter` 继承调用方 shell 的 PATH,不是 `mounts.js` 里 `attach`/`startSandbox` 用的固定 `BASE_PATH`/`NIX_PATH`;不是安全问题,但调试时用 `exec` 复现的行为可能和交互式 attach 不完全一样。
-- **Nix 闭包可能被 GC 回收后重拉**:term1 磁盘吃紧,`nix.conf` 配了 min-free/max-free 水位自动 GC;`nix develop` 的输出没有持久 gcroot,base-flake 闭包被回收后下次 `nix develop` 大概率要从 substituter(优先 term2)重新拉取,不是常驻不动的。
+- **Nix 闭包可能被 GC 回收后重拉**:磁盘吃紧的节点上,`nix.conf` 配了 min-free/max-free 水位自动 GC;`nix develop` 的输出没有持久 gcroot,base-flake 闭包被回收后下次 `nix develop` 大概率要从 substituter(优先集群里的其它节点)重新拉取,不是常驻不动的。
 
 ## 7. 故障排查
 
 - `journalctl -u boxrun-<名>` —— 盒起不来、OOM、崩溃先看这个。注意 unit 名是 `boxrun-<名>`(transient service),不是 `.scope`。
-- `ag-box status` —— 本机视角汇总:节点身份/globals 角色/内存默认上限/R2 连通性/restic 快照数/定时快照 timer 状态/本机活跃盒列表,一条命令代替下面几条手动核对。真机输出示例(term1):
+- `ag-box status` —— 本机视角汇总:节点身份/globals 角色/内存默认上限/R2 连通性/restic 快照数/定时快照 timer 状态/本机活跃盒列表,一条命令代替下面几条手动核对。真机输出示例(节点名为示例):
 
 ```
 $ ag-box status
-节点: term1(globals push)  内存默认上限: 1500M
+节点: node-a(globals push)  内存默认上限: 1500M
 R2 连通: ok
 restic 快照数: 3
 定时快照: active
