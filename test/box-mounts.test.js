@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { slugFor, buildBwrapArgs, isValidBoxName } = require('../lib/mounts');
+const { slugFor, buildBwrapArgs, isValidBoxName, boxPath, bashProfileContent } = require('../lib/mounts');
 
 test('slugFor 把 / 和 . 换成 -', () => {
   assert.strictEqual(slugFor('/root/mobile-terminal-web'), '-root-mobile-terminal-web');
@@ -70,6 +70,33 @@ test('nix 盒:store RO + daemon socket RW + PATH 带 nix profile', () => {
   assert.match(s, /--ro-bind \/nix \/nix/);
   assert.match(s, /--bind \/nix\/var\/nix\/daemon-socket \/nix\/var\/nix\/daemon-socket/);
   assert.match(s, /\/nix\/var\/nix\/profiles\/default\/bin/);
+});
+
+test('工具安装根:/.grok 与 /root/.bun 存在时 RO 绑入(修断链 grok/agent/bun)', () => {
+  const host = new Set(['/usr', '/etc', '/.grok', '/root/.bun']);
+  const s = buildBwrapArgs(OPTS, existsIn(host)).join(' ');
+  assert.match(s, /--ro-bind \/\.grok \/\.grok/);
+  assert.match(s, /--ro-bind \/root\/\.bun \/root\/\.bun/);
+});
+
+test('工具安装根缺失时不产生 bind(未装 grok/bun 的机器)', () => {
+  const s = buildBwrapArgs(OPTS, existsIn(new Set(['/usr', '/etc']))).join(' ');
+  assert.ok(!s.includes('/.grok'));
+  assert.ok(!s.includes('/root/.bun'));
+});
+
+test('boxPath:非 nix 含 /root/.local/bin,nix 前置 nix profile', () => {
+  assert.ok(boxPath(false).split(':').includes('/root/.local/bin'));
+  assert.ok(!boxPath(false).includes('/nix/'));
+  assert.ok(boxPath(true).startsWith('/nix/var/nix/profiles/default/bin:'));
+  assert.ok(boxPath(true).split(':').includes('/root/.local/bin'));
+});
+
+test('bashProfileContent:导出正确 PATH 并回源 .bashrc(堵 attach PATH 泄漏)', () => {
+  const p = bashProfileContent(false);
+  assert.match(p, /export PATH="\/root\/\.local\/bin:/);       // 强制正确 PATH
+  assert.match(p, /\.bashrc/);                                  // 保留交互配置
+  assert.ok(bashProfileContent(true).includes('/nix/var/nix/profiles/default/bin'));
 });
 
 test('挂载顺序:私有 HOME bind 先于其内部子路径 bind(安全不变量)', () => {
