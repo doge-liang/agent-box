@@ -1,7 +1,7 @@
 # ag-box sessions —— 跨机双向会话同步 设计文档
 
 - 日期:2026-07-19
-- 状态:已通过 brainstorm,待写实现计划
+- 状态:已通过 brainstorm;已对抗性评审(见 `../reviews/2026-07-19-session-sync-review.md`),评审修订见文末规范性附录;实现计划见 `../plans/2026-07-19-session-sync.md`
 - 仓库:agent-box(独立仓 github.com/doge-liang/agent-box)
 
 ## 背景与动机
@@ -130,3 +130,72 @@ ag-box 现能在服务器节点间迁移 agent 工作**沙盒**,迁移时快照�
 
 一期:claude、手动命令、union + memory `.conflict`、真机 spike 验 cwd 改写假设。
 后续(非本 spec):codex/grok 切片同步、自动/守护同步、删除传播、同 session 双写智能合并。
+
+---
+
+## 评审修订(2026-07-19,规范性——与上文冲突处以本节为准)
+
+依据对抗性评审(`../reviews/2026-07-19-session-sync-review.md`,含本机实测证据)作如下修订:
+
+### 修订 1:同步语义改为 state 驱动增量(替代裸 rclone copy)
+
+- crypt remote 不支持 checksum,rclone 只比 size+modtime;而 pull 落地要改写 cwd(大小必变)——裸 copy 会导致每轮全量重传,并产生 pull→push 回声(他机会话被再上传进本机命名空间、多机间乒乓覆盖)。
+- **pull**:`rclone lsjson -R` 他机命名空间 → 与 state 中上次快照(path/size/mtime)求差 → 只下载新增/变更,先落本机 cache(`~/.config/agentsync/cache/<uuid>/<机器ID>/`,保存未改写原件)→ 再改写落地进 slug 目录,落地后 `fs.utimes` 回写远端 mtime。
+- **push**:排除"他机来源且本地未续写"的文件。判据:state 落地记录(landedSize/landedMtime)与本地当前 stat 一致 → 不上传;本地续写过(大小/mtime 超出)→ 上传到本机命名空间(这正是跨机续写传播的正确语义)。
+- **落地防护**:本地同名文件 mtime 距今 < 5 分钟视为正被 claude 续写,跳过并警告,下次 pull 重试(claude 存储无锁文件,实测确认)。
+- mtime 比较一律带 2.5 秒容差(FAT/exFAT 2 秒精度)。
+
+### 修订 2:每机命名空间加 `_manifest.json`;rewriteCwd 改为前缀替换
+
+- 实测同一会话文件内 cwd 有多值(项目根及其子目录),且仅 user/assistant/system/attachment 等消息类记录带 cwd。
+- push 时在 `sessions/<uuid>/claude/<机器ID>/_manifest.json` 写 `{version, root, slug, sep, platform, hostname, pushedAt}`;pull 先读它取得源机项目根与路径分隔符。
+- 签名改为 **`rewriteCwd(text, oldRoot, newRoot, {fromSep, toSep})`**:仅"含 `"cwd"` 且前缀命中"的行重序列化;其余行(控制记录/非 JSON 行)**字节原样透传**。不改写历史 tool 输出中嵌的路径——resume 后模型上下文中会出现他机路径,列为已知限制。
+- `_manifest.json` 与 `*.conflict.md` 永不进入同步文件集。
+
+### 修订 3:slug 规则独立实现,禁止复用 mounts.slugFor
+
+- claude 实际规则(本机实证):**所有非字母数字字符 → `-`**(有损)。新写 `claudeSlug(p) = p.replace(/[^a-zA-Z0-9]/g, '-')`;`mounts.slugFor`(仅替换 `/` `.`)是盒挂载专用,勿混用。
+- Windows slug 规则(推断 `C:\Users\x\proj` → `C--Users-x-proj`)列 spike 验证。
+- slug 有损碰撞(两 UUID 映射同 slug)在 init 时检测并警告。
+
+### 修订 4:dispatch 与配置解耦
+
+- `cmds.sessions.noBoxConfig = true`;dispatch 改为 `handler.noBoxConfig ? null : loadConfig()`——现有盒命令零改动,sessions 不再要求盒配置存在。
+- 新 `loadSessionsConfig()`:读 `~/.config/agentsync/env`(`os.homedir()` 推导,禁止硬编码 `/root`);必填 `SYNC_S3_ENDPOINT/SYNC_BUCKET/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/SESSIONS_CRYPT_PASSWORD`,可选 `SESSIONS_CRYPT_PASSWORD2`(crypt 盐,启用后不可更换,与主口令一同离线备份)。
+- 测试种子(非常规使用):`AGENTSYNC_DIR` 覆盖配置目录、`AGENTSYNC_CLAUDE_DIR` 覆盖 `~/.claude/projects`、`SYNC_BACKEND=local`+`SYNC_LOCAL_ROOT` 用本地目录代替 R2(使端到端测试无需凭证)。
+
+### 修订 5:rclone crypt env 注入完整集(口令必须 obscure,实测实锤)
+
+- `RCLONE_CONFIG_*_PASSWORD` 必须是 `rclone obscure` 形式:明文注入报 base64 decode 错;明文恰为合法 base64 时会静默用错密钥。运行时经 stdin(`rclone obscure -`)现场转换,**绝不经 argv**(进程表可见)。
+- env 集:`RCLONE_CONFIG_SESSR2_{TYPE=s3,PROVIDER=Cloudflare,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY,NO_CHECK_BUCKET=true}` + `RCLONE_CONFIG_SESSCRYPT_{TYPE=crypt,REMOTE=SESSR2:<bucket>/sessions,PASSWORD=<obscured>,PASSWORD2=<obscured 盐>}`。文件名加密取默认(standard)。
+
+### 修订 6:安全声明改口 + 独立桶为默认建议
+
+- 同桶共享 S3 key 时,个人机凭证泄露虽不泄盒内容,但可覆盖/删除同桶 `restic/`+`boxes/` 对象(完整性风险;R2 token 只能按桶授权)。**默认建议 sessions 独立桶(如 `agent-sessions`)+ 独立 token**;坚持同桶须明示接受此风险。
+
+### 修订 7:memory 基线语义补全
+
+- 无基线(首同步)且两侧不同 → 一律按冲突处理(保守不覆盖);两侧相同 → 直接记基线。
+- state 按 memory 文件记 `baseline`(上次同步一致点哈希)与 `lastRemote`(上次见到的远端哈希);远端相对 lastRemote 无变化 → 跳过,不重复落同一冲突副本。
+- MEMORY.md(索引文件)为可预期的高频人工合并点,MVP 接受;行级 union 合并留后。
+
+### 修订 8:spike 清单扩充(实现第一步,真机验证)
+
+1. 改写 cwd + 异项目落地后 `claude --resume <id>` 能否续上(核心假设)。
+2. resume 续写同 `<uuid>.jsonl` 还是 fork 新 sessionId 文件(实测已见 parentUuid 跨文件证据);缺父文件是否影响续聊。
+3. `~/.claude.json` projects 条目 / trust dialog 对 resume 列表的影响(B 机首次进项目)。
+4. `~/.claude/history.jsonl` 不同步是否影响 resume 入口。
+5. `subagents/*.jsonl` 内 cwd 是否需同样改写(meta.json 实测无 cwd)。
+6. gitBranch 不匹配(A 的分支在 B 不存在/非 git 目录)是否影响。
+7. Windows slug 规则与盘符;Mac 路径。
+
+### 修订 9:验收标准措辞
+
+- AC3 改为:"不同 uuid 互不覆盖;同 uuid 双机续写按最后写胜"。
+- AC6 改为:Linux 跑通 + Mac 手动验为验收项;**Windows 列为 spike 后置**,不卡验收。
+- AC1/AC5 用裸 s3 路径 `rclone lsf` 验证"对象存在且文件名不可读"。
+
+### 修订 10:组件清单调整
+
+- 新增 `lib/sync-config.js`(独立配置/machine-id/projects.json/state 读写)与 `lib/sync-cmd.js`(init/push/pull/sync/list 编排),bin 保持薄分发。
+- `lib/sh.js` 的 `run` 增加 `maxBuffer` 选项(默认 64MB;Node 默认 1MB 会被大命名空间 `lsjson -R` 撑爆)。
