@@ -226,7 +226,7 @@ const cmds = {
     const subs = {
       init: () => sessionsCmd.init(pathArg),
       list: () => sessionsCmd.list(),
-      push: () => { throw new Error('push: 尚未实现'); },
+      push: () => sessionsCmd.push(pathArg),
       pull: () => { throw new Error('pull: 尚未实现'); },
       sync: () => { throw new Error('sync: 尚未实现'); },
     };

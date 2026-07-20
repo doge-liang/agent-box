@@ -70,3 +70,56 @@ test('list: 空提示;有项目则列出 uuid+路径+冲突数', () => {
     assert.ok(logs.some((m) => m.includes(proj) && m.includes('1 个 memory 冲突')));
   });
 });
+
+function fakeRclone() {
+  const calls = { rcat: [], copy: [] };
+  return {
+    calls,
+    remote: (rel) => `SESSCRYPT:${rel}`,
+    rcatFile: (cfg, relPath, content) => calls.rcat.push({ relPath, content }),
+    copyFiles: (cfg, src, dst, rels) => calls.copy.push({ src, dst, rels }),
+    lsDirs: () => [], lsFiles: () => [], catFile: () => null,
+  };
+}
+const FAKE_CFG = { backend: 'local', localRoot: '/unused', cryptPassword: 'pw', cryptPassword2: '' };
+
+test('push: 写 manifest + 增量上传;排除他机来源未续写与 conflict 文件', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const cfgMod = require('../lib/sync-config');
+    const { claudeSlug } = require('../lib/sync-identity');
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj);
+    cmd.init(proj, { log: () => {} });
+    const id = JSON.parse(fs.readFileSync(path.join(proj, '.agentsync'), 'utf8')).id;
+    const slugDir = path.join(process.env.AGENTSYNC_CLAUDE_DIR, claudeSlug(proj));
+    fs.mkdirSync(path.join(slugDir, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(slugDir, 'mine.jsonl'), 'x'.repeat(10));
+    fs.writeFileSync(path.join(slugDir, 'foreign.jsonl'), 'y'.repeat(50));
+    fs.writeFileSync(path.join(slugDir, 'memory', 'a.mB.conflict.md'), 'z');
+    // 预置 state:foreign.jsonl 为他机来源且与落地记录一致(回声必须被抑制)
+    const st = fs.statSync(path.join(slugDir, 'foreign.jsonl'));
+    const state = cfgMod.readState(id);
+    state.landed['foreign.jsonl'] = { origin: 'mB', remoteMtimeMs: 1, landedSize: st.size, landedMtimeMs: st.mtimeMs };
+    cfgMod.writeState(id, state);
+    const rcl = fakeRclone();
+    assert.strictEqual(cmd.push(proj, { log: () => {}, rclone: rcl, cfg: FAKE_CFG }), 0);
+    const mid = cfgMod.machineId();
+    assert.strictEqual(rcl.calls.rcat.length, 1);
+    assert.strictEqual(rcl.calls.rcat[0].relPath, `${id}/claude/${mid}/_manifest.json`);
+    const manifest = JSON.parse(rcl.calls.rcat[0].content);
+    assert.strictEqual(manifest.root, proj);
+    assert.strictEqual(manifest.sep, path.sep);
+    assert.deepStrictEqual(rcl.calls.copy[0].rels, ['mine.jsonl']);   // 只传本机原创
+    assert.strictEqual(rcl.calls.copy[0].dst, `SESSCRYPT:${id}/claude/${mid}`);
+  });
+});
+
+test('push: 未 init 报错', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const proj = path.join(tmp, 'raw');
+    fs.mkdirSync(proj);
+    assert.throws(() => cmd.push(proj, { log: () => {}, rclone: fakeRclone(), cfg: FAKE_CFG }), /先执行 ag-box sessions init/);
+  });
+});
