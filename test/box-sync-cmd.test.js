@@ -123,3 +123,98 @@ test('push: 未 init 报错', () => {
     assert.throws(() => cmd.push(proj, { log: () => {}, rclone: fakeRclone(), cfg: FAKE_CFG }), /先执行 ag-box sessions init/);
   });
 });
+
+function fakePullRclone({ origin, manifest, files, fixtures }) {
+  const calls = { copy: [] };
+  return {
+    calls,
+    remote: (rel) => `SESSCRYPT:${rel}`,
+    rcatFile: () => {},
+    lsDirs: () => [origin],
+    catFile: (cfg, relPath) => relPath.endsWith('_manifest.json') ? JSON.stringify(manifest) : null,
+    lsFiles: () => files,
+    copyFiles: (cfg, src, dstDir, rels) => {
+      if (!rels.length) return;              // 与真实实现一致:空列表零调用(否则二次 pull 的零下载断言失效)
+      calls.copy.push({ src, dstDir, rels });
+      for (const rel of rels) {
+        const p = path.join(dstDir, ...rel.split('/'));
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, fixtures[rel].content);
+        fs.utimesSync(p, new Date(fixtures[rel].mtimeMs), new Date(fixtures[rel].mtimeMs));
+      }
+    },
+  };
+}
+
+test('pull: 落地他机会话(cwd 改写 + mtime 回写)、memory 冲突落 .conflict、state 更新、退出码 3', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const cfgMod = require('../lib/sync-config');
+    const { claudeSlug } = require('../lib/sync-identity');
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj);
+    cmd.init(proj, { log: () => {} });
+    const id = JSON.parse(fs.readFileSync(path.join(proj, '.agentsync'), 'utf8')).id;
+    const slugDir = path.join(process.env.AGENTSYNC_CLAUDE_DIR, claudeSlug(proj));
+    fs.mkdirSync(path.join(slugDir, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(slugDir, 'memory', 'MEMORY.md'), '# local edit\n'); // 本地已有且与远端不同,无基线 → 冲突
+    const macRoot = '/Users/x/proj';
+    const uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const sessionLine = JSON.stringify({ type: 'user', cwd: macRoot + '/sub', sessionId: uuid });
+    const T = Date.parse('2026-07-19T00:00:00Z');
+    const rcl = fakePullRclone({
+      origin: 'mac-1111',
+      manifest: { version: 1, root: macRoot, slug: 'x', sep: '/', platform: 'darwin' },
+      files: [
+        { rel: `${uuid}.jsonl`, size: sessionLine.length + 1, mtimeMs: T },
+        { rel: 'memory/MEMORY.md', size: 9, mtimeMs: T },
+        { rel: '_manifest.json', size: 5, mtimeMs: T },
+      ],
+      fixtures: {
+        [`${uuid}.jsonl`]: { content: sessionLine + '\n', mtimeMs: T },
+        'memory/MEMORY.md': { content: '# remote\n', mtimeMs: T },
+      },
+    });
+    const logs = [];
+    const code = cmd.pull(proj, { log: (m) => logs.push(m), rclone: rcl, cfg: FAKE_CFG, nowMs: () => T + 60 * 60 * 1000 });
+    assert.strictEqual(code, 3);                                             // 有冲突
+    const landed = fs.readFileSync(path.join(slugDir, `${uuid}.jsonl`), 'utf8');
+    assert.strictEqual(JSON.parse(landed.trim()).cwd, path.join(proj, 'sub')); // cwd 前缀改写 + 分隔符转换
+    assert.strictEqual(fs.statSync(path.join(slugDir, `${uuid}.jsonl`)).mtimeMs, T); // mtime 回写
+    assert.strictEqual(fs.readFileSync(path.join(slugDir, 'memory', 'MEMORY.md'), 'utf8'), '# local edit\n'); // 本地不被覆盖
+    assert.ok(fs.existsSync(path.join(slugDir, 'memory', 'MEMORY.mac-1111.conflict.md')));
+    const state = cfgMod.readState(id);
+    assert.ok(state.machines['mac-1111'][`${uuid}.jsonl`]);
+    assert.strictEqual(state.landed[`${uuid}.jsonl`].origin, 'mac-1111');
+    // 再次 pull:远端无变化 → 零下载、不重复落冲突
+    const before = rcl.calls.copy.length;
+    assert.strictEqual(cmd.pull(proj, { log: () => {}, rclone: rcl, cfg: FAKE_CFG, nowMs: () => T + 2 * 60 * 60 * 1000 }), 0);
+    assert.strictEqual(rcl.calls.copy.length, before);
+    assert.strictEqual(fs.readdirSync(path.join(slugDir, 'memory')).filter((f) => f.includes('conflict')).length, 1);
+  });
+});
+
+test('pull: 活跃窗口内的本地文件跳过覆盖', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const { claudeSlug } = require('../lib/sync-identity');
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj);
+    cmd.init(proj, { log: () => {} });
+    const slugDir = path.join(process.env.AGENTSYNC_CLAUDE_DIR, claudeSlug(proj));
+    fs.mkdirSync(slugDir, { recursive: true });
+    const T = Date.parse('2026-07-19T00:00:00Z');
+    fs.writeFileSync(path.join(slugDir, 'active.jsonl'), 'local\n');
+    fs.utimesSync(path.join(slugDir, 'active.jsonl'), new Date(T), new Date(T));  // 本地 mtime = T(nowMs 附近 → 活跃)
+    const rcl = fakePullRclone({
+      origin: 'mB',
+      manifest: { version: 1, root: '/other', sep: '/' },
+      files: [{ rel: 'active.jsonl', size: 7, mtimeMs: T + 100000 }],
+      fixtures: { 'active.jsonl': { content: 'remote\n', mtimeMs: T + 100000 } },
+    });
+    const logs = [];
+    cmd.pull(proj, { log: (m) => logs.push(m), rclone: rcl, cfg: FAKE_CFG, nowMs: () => T + 1000 });
+    assert.strictEqual(fs.readFileSync(path.join(slugDir, 'active.jsonl'), 'utf8'), 'local\n'); // 未覆盖
+    assert.ok(logs.some((m) => m.includes('跳过')));
+  });
+});
