@@ -65,4 +65,10 @@ test('planMemoryLanding: 全状态矩阵', () => {
   // 冲突已见过同一远端版本(lastRemote 未变)→ 不重复落盘
   assert.deepStrictEqual(P.planMemoryLanding({ localHash: H.a, remoteHash: H.b, lastRemoteHash: H.b }),
     { action: 'skip', reason: 'stale-remote' });
+  // 仅本地改且 lastRemote 未播种(baseline 刚建立)→ 不误判冲突
+  assert.deepStrictEqual(P.planMemoryLanding({ localHash: H.a, remoteHash: H.base, baselineHash: H.base }),
+    { action: 'skip', reason: 'stale-remote' });
+  // 远端回退到基线值(lastRemote 停在他处)→ 亦跳过
+  assert.deepStrictEqual(P.planMemoryLanding({ localHash: H.a, remoteHash: H.base, baselineHash: H.base, lastRemoteHash: H.b }),
+    { action: 'skip', reason: 'stale-remote' });
 });
