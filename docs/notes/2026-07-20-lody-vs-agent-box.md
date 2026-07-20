@@ -88,12 +88,48 @@ lody 自研部分实为 `LinuxCgroupSessionSandbox` —— **仅 Linux 的 cgrou
 - **lody 更强**:实时多写 CRDT 收敛(含协作光标/presence)、手机对进行中对话做结构化 steer/cancel、团队工作区与成员权限、原生移动 App、GitHub PR/CI/review 深度自动化。这些都得益于"状态天生活在云端"。
 - **本项目更强**:数据离机前即客户端加密(零知识/数据主权)、不依赖第三方基础设施可用性与信任、故障模式更简单、能把**同一会话真正搬到另一台物理机继续执行**(而非仅远程看/发指令)、沙盒执行环境本身可跨节点迁移。
 
-## 可借鉴且与本架构不冲突的点
+## 可借鉴且与本架构不冲突的点(落地设计稿)
 
-以下三项适合作为**面板增强**,且无需引入云端 CRDT 依赖:
-1. **任务/会话完成推送通知**(lody 的核心体验之一)。
-2. **自动 PR 绑定**(会话 ↔ PR 关联,一键建 PR 带实现摘要)。
-3. **review 评论同步 / AI Review Loop**(抓 PR 评论→逐条判定→修复→回推)。
+以下三项适合作为面板/ag-box 增强,均不引入云端 CRDT 依赖,也不改变"数据离机前加密、自托管"的信任模型。三者存在依赖关系:第 2 项是第 3 项的前置(loop 需要知道盒/会话对应哪个 PR);第 1 项的通道被第 3 项复用(review 轮结束或需人工裁决时推送)。建议实施顺序 1 → 2 → 3。
+
+### 1. 任务/会话完成推送通知
+
+lody 侧:原生 App 推送是其核心体验,由云端在任务完成时下发。本项目无需原生 App,PWA Web Push 即可达到同等体验:
+
+- **触发源**:Claude Code 原生 hooks。`Stop`(一轮结束)与 `Notification`(等待授权/输入)各挂一个小脚本,POST 到节点 server.js 新增的 loopback 端点(如 `POST /t/notify`,仅 127.0.0.1,不扩大入站攻击面)。盒内会话若与宿主共享网络命名空间则直接可达;否则由 ag-box 在 up 时向盒内注入代理 socket。
+- **通路**:节点→面板方向复用既有服务令牌体系(server.js 已有按 CN 的服务令牌校验先例),节点 POST 面板 worker 新端点 `/api/push/send`;worker 从 KV 读订阅,经 Web Push(VAPID)下发。
+- **订阅端**:mobile-terminal-web 的 service worker 增加 `push`/`notificationclick` 处理,订阅对象存 worker KV。iOS 16.4+ 仅对"已添加到主屏幕"的 PWA 开放 Web Push,面板需放一次性引导。
+- **数据主权分析**:Web Push 载荷按 RFC 8291(aes128gcm)端到端加密,APNs/FCM 等推送中继读不到内容;更保守的做法是只推无内容 ping(仅盒名或其哈希),详情回面板经 Access 认证后拉取 —— 明文零出域。两种姿态都严格优于 lody 的明文上云。
+- **去重**:以 session/盒 id 作 notification tag,同一会话多轮完成合并替换,避免轰炸。
+
+代价:VAPID 密钥对(worker secret)+ KV 订阅表 + hook 脚本 + server.js/worker 各一个端点;无新第三方运行时依赖(Web Push 加密可用 worker 内置 WebCrypto 实现)。
+
+### 2. 会话 ↔ PR 自动绑定
+
+lody 侧:每 session 一个 `lody/` 前缀分支,分支名由 LLM 生成,PR/CI 状态由 GitHub 集成同步进 App。本项目的落点是**把绑定写进盒的 R2 侧 meta.json**:
+
+- **数据模型**:box meta(`boxes/<name>/meta.json`,lib/meta.js)增加 `prs: [{repo, branch, number, url, created_at}]`。meta 本就存于 R2、与节点无关,因此绑定天然随盒迁移,且盒 park 期间面板仍可见 —— 这是 lody"执行钉死原机"给不出的语义。
+- **写入时机**:a) 新增 `ag-box pr <box>` 子命令,在盒 worktree 内 `gh pr create --draft --fill`(正文摘要可由 `claude -p` 一次性生成),成功后回写 meta;b) 兜底:`ls --json`(lib/lsjson.js)输出时按当前分支 `gh pr list --head <branch>` 懒发现既有 PR 并回填。
+- **状态展示**:lsjson 增加 `git: {branch, pr: {number, state, checks}}`;PR 状态由节点侧 `gh pr view --json state,statusCheckRollup` 获取并缓存约 60s(节点已有 gh 凭证),面板 worker 不新增任何 GitHub secret。面板盒卡片渲染 PR 徽章(open/merged/CI 红绿),点击跳 GitHub。
+- **面板动作**:新增 op `/t/box/pr-create`,走 server.js 既有 ops 表 + 服务令牌链路,面板一键建草稿 PR。
+
+代价:meta schema 版本 +1、lsjson 与面板渲染改动、一个新 op。风险:节点上 gh 凭证的权限面 —— 建议换 fine-grained PAT 并只授相关仓。
+
+### 3. AI Review Loop(抓 PR 评论 → 判定 → 修复 → 回推)
+
+lody 侧:抓 PR review 评论→逐条判定→修复→推提交→评论回执,循环至干净。本项目以 ag-box 侧脚本实现,MVP 用出站轮询,不开 webhook:
+
+- **触发**:面板按钮(新 op `review-once`)为主,可选节点 cron 轮询。**不建议先上 GitHub webhook**:需要公网入站端点并把事件路由到盒所在节点,与本项目"节点只出不进"的网络姿态相悖;`gh api` 出站轮询足够。
+- **游标**:box meta 记 `review_cursor`(已处理的最后 comment id/updated_at),随盒迁移;每轮只取增量评论。
+- **判定**:每条评论先过结构化判定(`claude -p` 单发,输出 需修改/无需修改/需人工 三态附理由);"需人工"走第 1 项通道推送,不盲改。
+- **修复**:对"需修改"集合,`claude -p --resume <session-id>` 续原实现会话执行 —— ag-box sessions 已保证会话文件随盒走,loop 在盒当前所在节点即可带全量上下文续跑,此点同样优于 lody。修复后普通 push(禁 force-push),并以 `gh api` 回复对应评论附 commit SHA。
+- **护栏**(吸取 lody 自身无安全沙盒的教训):每轮都在 bwrap 盒内执行;评论作者白名单(陌生账号的评论不进 prompt,防提示注入);每条评论最多 N 轮(防与 reviewer bot 互触发死循环);单轮改动超阈值(如 ±500 行)自动转"需人工"。
+
+代价:一个 review-loop 脚本 + 一个新 op + meta 两个字段。前置:第 2 项的绑定。
+
+### 三项共同的边界
+
+均不引入:云端状态存储、第三方运行时依赖、公网入站端点(webhook 明确延后)、对话内容明文出域。
 
 ## 明确不建议照搬
 
