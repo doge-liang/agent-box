@@ -218,3 +218,40 @@ test('pull: 活跃窗口内的本地文件跳过覆盖', () => {
     assert.ok(logs.some((m) => m.includes('跳过')));
   });
 });
+
+test('pull: 嵌套 memory 子目录冲突文件路径正确、无重复 sub', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const cfgMod = require('../lib/sync-config');
+    const { claudeSlug } = require('../lib/sync-identity');
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj);
+    cmd.init(proj, { log: () => {} });
+    const id = JSON.parse(fs.readFileSync(path.join(proj, '.agentsync'), 'utf8')).id;
+    const slugDir = path.join(process.env.AGENTSYNC_CLAUDE_DIR, claudeSlug(proj));
+    fs.mkdirSync(path.join(slugDir, 'memory', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(slugDir, 'memory', 'sub', 'foo.md'), '# local\n'); // 本地已有且与远端不同,无基线 → 冲突
+    const macRoot = '/Users/x/proj';
+    const T = Date.parse('2026-07-20T00:00:00Z');
+    const rcl = fakePullRclone({
+      origin: 'mB',
+      manifest: { version: 1, root: macRoot, slug: 'x', sep: '/' },
+      files: [
+        { rel: 'memory/sub/foo.md', size: 9, mtimeMs: T },
+      ],
+      fixtures: {
+        'memory/sub/foo.md': { content: '# remote\n', mtimeMs: T },
+      },
+    });
+    const logs = [];
+    const code = cmd.pull(proj, { log: (m) => logs.push(m), rclone: rcl, cfg: FAKE_CFG, nowMs: () => T + 60 * 60 * 1000 });
+    assert.strictEqual(code, 3);                                             // 有冲突
+    assert.strictEqual(fs.readFileSync(path.join(slugDir, 'memory', 'sub', 'foo.md'), 'utf8'), '# local\n'); // 本地不被覆盖
+    // 检查冲突文件路径正确:应在 memory/sub/foo.mB.conflict.md,不在 memory/sub/sub/foo.mB.conflict.md
+    const conflictPath = path.join(slugDir, 'memory', 'sub', 'foo.mB.conflict.md');
+    assert.ok(fs.existsSync(conflictPath), `冲突文件必须存在于 ${conflictPath}`);
+    assert.strictEqual(fs.readFileSync(conflictPath, 'utf8'), '# remote\n');
+    const wrongPath = path.join(slugDir, 'memory', 'sub', 'sub', 'foo.mB.conflict.md');
+    assert.ok(!fs.existsSync(wrongPath), `错误路径不应存在: ${wrongPath}`);
+  });
+});
