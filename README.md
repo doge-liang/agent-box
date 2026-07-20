@@ -88,6 +88,39 @@ ssh -t my-second-node ag-box attach myproj   # 接入,agent 里 --resume 续上�
 
 `ag-box up` 在非目标节点执行且未指定本机 `--node` 时,会探测各节点内存并自动 ssh 到目标节点远程拉起;`--force` 用于抢占他机仍持有的活跃租约(见"故障排查")。
 
+## sessions——跨机会话同步(非盒项目)
+
+把个人机/服务器上**未 track 成盒**的本地项目的 claude 会话历史,加密同步到 R2,
+任一机器开的会话可在另一机器 `claude --resume` 续聊。与盒功能相互独立:
+不需要 bwrap/systemd,不需要盒配置,跨平台(Linux/Mac 验证,Windows 实验性)。
+
+### 配置(每台机器一次)
+
+1. 安装 rclone(个人机唯一外部依赖)。
+2. `cp env.sessions.example ~/.config/agentsync/env && chmod 600 ~/.config/agentsync/env`,填入
+   R2 endpoint、桶名、S3 凭证与 `SESSIONS_CRYPT_PASSWORD`。
+   - **强烈建议独立桶 + 独立 token**(R2 只能按桶授权;与盒同桶时,该凭证可覆盖/删除盒对象)。
+   - **SESSIONS_CRYPT_PASSWORD 丢失即全部不可解密,务必离线备份**(与 RESTIC_PASSWORD 同等对待)。
+
+### 使用
+
+    ag-box sessions init [path]   # 项目根建 .agentsync(UUID)+ 登记本机路径;建议把 .agentsync 提交进项目 git
+    ag-box sessions push [path]   # 本机该项目会话上传到本机命名空间
+    ag-box sessions pull [path]   # 拉他机命名空间会话,改写 cwd 落进本机 ~/.claude/projects/<slug>/
+    ag-box sessions sync [path]   # push 后 pull
+    ag-box sessions list          # 已登记项目 + 待合并冲突数
+
+### 已知限制(MVP)
+
+- 只同步 claude(codex/grok 留后);手动命令,无守护进程。
+- 无删除传播:本地删除的会话不会删远端/他机。
+- 同一 session 双机并发续写:最后写胜(极罕见)。
+- memory 双机并发修改:远端版落 `<name>.<机器ID>.conflict.md`,人工合并;MEMORY.md 属高频冲突点。
+- 落地只改写记录的 cwd 字段;历史 tool 输出里的他机路径原样保留。
+- pull 不覆盖 5 分钟内有写入的本地会话文件(防与正在续写的 claude 交错),下次 pull 重试。
+- machine-id 随 VM 镜像克隆会碰撞(两机互认同一命名空间),克隆后删 `~/.config/agentsync/machine-id` 重新生成。
+- Windows:slug 规则未实测,列为实验性;`node bin\ag-box` 或 npm shim 方式运行。
+
 ## 4. 铁律
 
 - **`.auth-secret` 永不入快照**:`exclude.txt` 里排除;`ag-box track` 检测到项目目录里有 `.auth-secret` 会自动把该盒 `pin` 到当前节点。适用场景:某个项目目录里有一个**每节点必须不同**的密钥文件(例如各节点独立签发的 HMAC 签名密钥),把它命名为 `.auth-secret`,ag-box 就既不会把它同步进快照泄漏到其它节点,也不会把这个沙盒调度过去、覆盖掉那台机器上的专属密钥。
