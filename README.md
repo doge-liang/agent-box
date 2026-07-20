@@ -92,7 +92,7 @@ ssh -t my-second-node ag-box attach myproj   # 接入,agent 里 --resume 续上�
 
 把个人机/服务器上**未 track 成盒**的本地项目的 claude 会话历史,加密同步到 R2,
 任一机器开的会话可在另一机器 `claude --resume` 续聊。与盒功能相互独立:
-不需要 bwrap/systemd,不需要盒配置,跨平台(Linux/Mac 验证,Windows 实验性)。
+不需要 bwrap/systemd,不需要盒配置,跨平台(Linux 已验证,Mac 待手动验收,Windows 实验性)。
 
 ### 配置(每台机器一次)
 
@@ -115,7 +115,7 @@ ssh -t my-second-node ag-box attach myproj   # 接入,agent 里 --resume 续上�
 - 只同步 claude(codex/grok 留后);手动命令,无守护进程。
 - 无删除传播:本地删除的会话不会删远端/他机。
 - 同一 session 双机并发续写:最后写胜(极罕见)。
-- memory 双机并发修改:远端版落 `<name>.<机器ID>.conflict.md`,人工合并;MEMORY.md 属高频冲突点。
+- memory 双机并发修改:远端版落 `<name>.<机器ID前8位>.conflict.md`,人工合并;MEMORY.md 属高频冲突点。
 - 落地只改写记录的 cwd 字段;历史 tool 输出里的他机路径原样保留。
 - pull 不覆盖 5 分钟内有写入的本地会话文件(防与正在续写的 claude 交错),下次 pull 重试。
 - machine-id 随 VM 镜像克隆会碰撞(两机互认同一命名空间),克隆后删 `~/.config/agentsync/machine-id` 重新生成。

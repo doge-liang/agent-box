@@ -256,6 +256,70 @@ test('pull: 嵌套 memory 子目录冲突文件路径正确、无重复 sub', ()
   });
 });
 
+test('pull: 远端清单越界路径段被拒(路径穿越防护),合法条目正常落地', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const { claudeSlug } = require('../lib/sync-identity');
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj);
+    cmd.init(proj, { log: () => {} });
+    const slugDir = path.join(process.env.AGENTSYNC_CLAUDE_DIR, claudeSlug(proj));
+    const T = Date.parse('2026-07-20T00:00:00Z');
+    const evilRel = '../../evil.jsonl';
+    const rcl = fakePullRclone({
+      origin: 'mB',
+      manifest: { version: 1, root: '/other', sep: '/' },
+      files: [
+        { rel: evilRel, size: 5, mtimeMs: T },
+        { rel: 'ok.jsonl', size: 3, mtimeMs: T },
+      ],
+      fixtures: {
+        [evilRel]: { content: 'evil\n', mtimeMs: T },
+        'ok.jsonl': { content: 'ok\n', mtimeMs: T },
+      },
+    });
+    const logs = [];
+    const code = cmd.pull(proj, { log: (m) => logs.push(m), rclone: rcl, cfg: FAKE_CFG, nowMs: () => T + 60 * 60 * 1000 });
+    assert.strictEqual(code, 0);
+    assert.strictEqual(fs.readFileSync(path.join(slugDir, 'ok.jsonl'), 'utf8'), 'ok\n');
+    const escapeTarget = path.resolve(path.join(slugDir, '..', '..', 'evil.jsonl'));
+    assert.ok(!fs.existsSync(escapeTarget), `逃逸目标不应存在: ${escapeTarget}`);
+    assert.ok(logs.some((m) => m.includes('非法远端路径')), '应记录非法远端路径警告');
+    // 恶意条目在规划前即被过滤,不应进入下载(fixture 也就从未被写入 cache)
+    const downloadedRels = rcl.calls.copy.flatMap((c) => c.rels);
+    assert.ok(!downloadedRels.includes(evilRel), '恶意 rel 不应进入下载计划');
+  });
+});
+
+test('init: 项目路径变更时重置同步 state;同路径重复 init 不重置', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const cfgMod = require('../lib/sync-config');
+    const projA = path.join(tmp, 'projA');
+    fs.mkdirSync(projA);
+    cmd.init(projA, { log: () => {} });
+    const id = JSON.parse(fs.readFileSync(path.join(projA, '.agentsync'), 'utf8')).id;
+    const nonEmptyState = {
+      version: 1,
+      machines: { m1: { 'x.jsonl': { size: 1, mtimeMs: 1 } } },
+      landed: { 'x.jsonl': { origin: 'm1', remoteMtimeMs: 1, landedSize: 1, landedMtimeMs: 1 } },
+      memory: {},
+    };
+    cfgMod.writeState(id, nonEmptyState);
+    // 同路径重复 init:不应重置
+    cmd.init(projA, { log: () => {} });
+    assert.deepStrictEqual(cfgMod.readState(id), nonEmptyState);
+    // 路径变更(同 id,不同目录):应重置为空 state
+    const projB = path.join(tmp, 'projB');
+    fs.mkdirSync(projB);
+    fs.writeFileSync(path.join(projB, '.agentsync'), JSON.stringify({ id }));
+    const logs = [];
+    cmd.init(projB, { log: (m) => logs.push(m) });
+    assert.deepStrictEqual(cfgMod.readState(id), { version: 1, machines: {}, landed: {}, memory: {} });
+    assert.ok(logs.some((m) => m.includes('已重置该项目的同步状态')));
+  });
+});
+
 test('sync: push 后 pull;pull 冲突码透传', () => {
   withEnv((tmp) => {
     const cmd = require('../lib/sync-cmd');
