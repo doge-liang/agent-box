@@ -255,3 +255,25 @@ test('pull: 嵌套 memory 子目录冲突文件路径正确、无重复 sub', ()
     assert.ok(!fs.existsSync(wrongPath), `错误路径不应存在: ${wrongPath}`);
   });
 });
+
+test('sync: push 后 pull;pull 冲突码透传', () => {
+  withEnv((tmp) => {
+    const cmd = require('../lib/sync-cmd');
+    const proj = path.join(tmp, 'proj');
+    fs.mkdirSync(proj);
+    cmd.init(proj, { log: () => {} });
+    const order = [];
+    const deps = {
+      log: () => {}, cfg: FAKE_CFG,
+      rclone: {
+        remote: (rel) => `SESSCRYPT:${rel}`,
+        rcatFile: () => order.push('push-manifest'),
+        copyFiles: () => order.push('copy'),
+        lsDirs: () => { order.push('pull-ls'); return []; },
+        lsFiles: () => [], catFile: () => null,
+      },
+    };
+    assert.strictEqual(cmd.sync(proj, deps), 0);
+    assert.deepStrictEqual(order, ['push-manifest', 'copy', 'pull-ls']);
+  });
+});

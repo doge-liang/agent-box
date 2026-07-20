@@ -228,7 +228,7 @@ const cmds = {
       list: () => sessionsCmd.list(),
       push: () => sessionsCmd.push(pathArg),
       pull: () => sessionsCmd.pull(pathArg),
-      sync: () => { throw new Error('sync: 尚未实现'); },
+      sync: () => sessionsCmd.sync(pathArg),
     };
     if (!subs[sub]) throw new Error('用法: ag-box sessions <init|push|pull|sync|list> [path]');
     return subs[sub]();
