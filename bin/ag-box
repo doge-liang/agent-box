@@ -13,6 +13,7 @@ const { isValidBoxName } = require('../lib/mounts');
 const { run, ssh } = require('../lib/sh');
 const { loadConfig, hostFor } = require('../lib/env');
 const { formatBoxesJson } = require('../lib/lsjson');
+const sessionsCmd = require('../lib/sync-cmd');
 
 const USAGE = `用法: ag-box <命令> [参数]
   ls [--json]                列出全部沙盒(--json 供程序解析)
@@ -25,7 +26,8 @@ const USAGE = `用法: ag-box <命令> [参数]
   globals <push|pull|auto>   全局配置同步
   prune                      按保留策略清理旧快照
   drop <名>                  删除沙盒的 R2 数据(交互确认)
-  status                     本机视角状态`;
+  status                     本机视角状态
+  sessions <init|push|pull|sync|list> [path]  跨机会话同步(非盒项目;独立配置 ~/.config/agentsync/env)`;
 
 function parseArgs(argv) {
   const args = { _: [], flags: {}, rest: [] };
@@ -218,6 +220,20 @@ const cmds = {
     });
   },
 
+  sessions: (cfg, args) => {
+    const sub = args._[0];
+    const pathArg = args._[1];
+    const subs = {
+      init: () => sessionsCmd.init(pathArg),
+      list: () => sessionsCmd.list(),
+      push: () => sessionsCmd.push(pathArg),
+      pull: () => sessionsCmd.pull(pathArg),
+      sync: () => sessionsCmd.sync(pathArg),
+    };
+    if (!subs[sub]) throw new Error('用法: ag-box sessions <init|push|pull|sync|list> [path]');
+    return subs[sub]();
+  },
+
   status: (cfg) => {
     const { run } = require('../lib/sh');
     console.log(`节点: ${cfg.node}(globals ${cfg.globalsRole})  内存默认上限: ${cfg.memoryMax}`);
@@ -232,6 +248,7 @@ const cmds = {
     console.log(`本机活跃盒:\n${act || '  (无)'}`);
   },
 };
+cmds.sessions.noBoxConfig = true; // sessions 用独立配置,不要求盒 env 存在
 
 const [cmd, ...rest] = process.argv.slice(2);
 if (!cmd || cmd === '--help' || cmd === '-h' || !cmds[cmd]) {
@@ -239,7 +256,8 @@ if (!cmd || cmd === '--help' || cmd === '-h' || !cmds[cmd]) {
   process.exit(cmd && cmd !== '--help' && cmd !== '-h' ? 1 : 0);
 }
 try {
-  process.exitCode = cmds[cmd](loadConfig(), parseArgs(rest)) || 0;
+  const handler = cmds[cmd];
+  process.exitCode = handler(handler.noBoxConfig ? null : loadConfig(), parseArgs(rest)) || 0;
 } catch (e) {
   console.error(`box: ${e.message}`);
   process.exit(1);
