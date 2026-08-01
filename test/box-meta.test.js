@@ -1,7 +1,10 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { interpretMetaCat, interpretListResult } = require('../lib/meta');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { interpretMetaCat, interpretListResult, writeMeta } = require('../lib/meta');
 
 test('status 0 + 空 stdout: 判定为不存在(R2 真机回归)', () => {
   assert.strictEqual(interpretMetaCat({ status: 0, stdout: '', stderr: '' }), null);
@@ -20,6 +23,32 @@ test('status 0 + 合法 JSON: 保留字段并升级元数据', () => {
   assert.equal(r.schema_version, 2);
   assert.match(r.project_id, /^[0-9a-f-]{36}$/);
   assert.deepStrictEqual(r.local_paths, {});
+});
+
+test('writeMeta keeps local paths out of the R2 payload', (t) => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-box-meta-'));
+  t.after(() => fs.rmSync(configDir, { recursive: true, force: true }));
+  let payload;
+  writeMeta(
+    { bucket: 'test', rcloneEnv: {}, paths: { configDir } },
+    'box-smoke',
+    {
+      name: 'box-smoke', path: '/legacy/compatible', project_id: '8b728a5d-cc09-4937-936c-a2d339d88e14',
+      local_paths: { laptop: '/work/private-project' },
+    },
+    (_command, _args, options) => { payload = options.input; },
+  );
+  assert.equal(payload.includes('local_paths'), false);
+  assert.equal(payload.includes('/work/private-project'), false);
+  assert.match(payload, /8b728a5d-cc09-4937-936c-a2d339d88e14/);
+  assert.equal(
+    fs.existsSync(path.join(configDir, 'projects', '8b728a5d-cc09-4937-936c-a2d339d88e14.json')),
+    true,
+  );
+  assert.deepStrictEqual(
+    JSON.parse(fs.readFileSync(path.join(configDir, 'projects', '8b728a5d-cc09-4937-936c-a2d339d88e14.json'), 'utf8')),
+    { local_paths: { laptop: '/work/private-project' } },
+  );
 });
 
 test('status 0 + 非法 JSON: 抛出"内容非法"错误', () => {
