@@ -11,10 +11,15 @@ test('status 0 + 空白 stdout(仅换行): 判定为不存在', () => {
   assert.strictEqual(interpretMetaCat({ status: 0, stdout: '\n', stderr: '' }), null);
 });
 
-test('status 0 + 合法 JSON: 返回解析后的对象', () => {
+test('status 0 + 合法 JSON: 保留字段并升级元数据', () => {
   const meta = { name: 'box-smoke', pin: null, leased_by: 'term1' };
   const r = interpretMetaCat({ status: 0, stdout: JSON.stringify(meta), stderr: '' });
-  assert.deepStrictEqual(r, meta);
+  assert.equal(r.name, meta.name);
+  assert.equal(r.pin, meta.pin);
+  assert.equal(r.leased_by, meta.leased_by);
+  assert.equal(r.schema_version, 2);
+  assert.match(r.project_id, /^[0-9a-f-]{36}$/);
+  assert.deepStrictEqual(r.local_paths, {});
 });
 
 test('status 0 + 非法 JSON: 抛出"内容非法"错误', () => {
