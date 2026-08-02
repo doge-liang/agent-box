@@ -1,0 +1,2 @@
+'use strict'; const test = require('node:test'); const assert = require('node:assert'); const { commandSupport, requireLinuxRuntime } = require('../lib/core');
+test('portable commands run on Windows while sandbox commands require Linux', () => { assert.equal(commandSupport('pull', 'win32').ok, true); assert.match(commandSupport('attach', 'win32').reason, /Linux/); assert.throws(() => requireLinuxRuntime('park', 'darwin'), /Linux/); });

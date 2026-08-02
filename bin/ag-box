@@ -14,6 +14,7 @@ const { run, ssh } = require('../lib/sh');
 const { loadConfig, hostFor } = require('../lib/env');
 const { formatBoxesJson } = require('../lib/lsjson');
 const sessionsCmd = require('../lib/sync-cmd');
+const { requireLinuxRuntime } = require('../lib/core');
 
 const USAGE = `用法: ag-box <命令> [参数]
   ls [--json]                列出全部沙盒(--json 供程序解析)
@@ -83,6 +84,7 @@ const cmds = {
   },
 
   up: (cfg, args) => {
+    requireLinuxRuntime('up');
     const name = args._[0];
     const meta = mustMeta(cfg, name);
     if (!args.flags.local) {
@@ -110,6 +112,7 @@ const cmds = {
   },
 
   park: (cfg, args) => {
+    requireLinuxRuntime('park');
     const name = args._[0];
     const meta = mustMeta(cfg, name);
     if (meta.leased_by !== cfg.node) throw new Error(`租约不在本机(${meta.leased_by || '已归档'})`);
@@ -141,6 +144,7 @@ const cmds = {
   },
 
   attach: (cfg, args) => {
+    requireLinuxRuntime('attach');
     const name = args._[0];
     const meta = mustMeta(cfg, name);
     if (meta.leased_by !== cfg.node) throw new Error(`租约在 ${meta.leased_by || '无'}——先 ag-box up ${name}`);
@@ -149,6 +153,7 @@ const cmds = {
   },
 
   exec: (cfg, args) => {
+    requireLinuxRuntime('exec');
     const name = args._[0];
     if (!name || !args.rest.length) throw new Error('用法: ag-box exec <名> -- <命令...>');
     return runtime.execIn(name, mustMeta(cfg, name), args.rest);
