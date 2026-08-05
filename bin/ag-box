@@ -3,6 +3,7 @@
 // ag-box——agent 工作沙盒 CLI:bwrap 隔离 + restic→R2 迁移 + Nix 环境
 // 子命令实现随任务推进逐个填充;未实现的先报错占位
 const fs = require('fs');
+const path = require('path');
 const metaMod = require('../lib/meta');
 const runtime = require('../lib/runtime');
 const snapMod = require('../lib/snapshot');
@@ -14,7 +15,7 @@ const { run, ssh } = require('../lib/sh');
 const { loadConfig, hostFor } = require('../lib/env');
 const { formatBoxesJson } = require('../lib/lsjson');
 const sessionsCmd = require('../lib/sync-cmd');
-const { requireLinuxRuntime } = require('../lib/core');
+const { requireLinuxRuntime, createSyncCore } = require('../lib/core');
 
 const USAGE = `用法: ag-box <命令> [参数]
   ls [--json]                列出全部沙盒(--json 供程序解析)
@@ -28,6 +29,7 @@ const USAGE = `用法: ag-box <命令> [参数]
   prune                      按保留策略清理旧快照
   drop <名>                  删除沙盒的 R2 数据(交互确认)
   status                     本机视角状态
+  serve                      启动仅本机可访问的同步管理面板
   sessions <init|push|pull|sync|list> [path]  跨机会话同步(非盒项目;独立配置 ~/.config/agentsync/env)`;
 
 function parseArgs(argv) {
@@ -239,6 +241,24 @@ const cmds = {
     return subs[sub]();
   },
 
+  serve: () => {
+    const crypto = require('crypto');
+    const os = require('os');
+    const cfg = require('../lib/sync-config');
+    const { createServer } = require('../lib/server');
+    const token = crypto.randomBytes(32).toString('base64url');
+    const tokenFile = path.join(cfg.configDir(), 'panel-token');
+    fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
+    try { fs.chmodSync(tokenFile, 0o600); } catch { /* Windows ACLs govern permissions. */ }
+    const { server } = createServer({ core: createSyncCore(), token });
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      console.log(`本地面板: http://127.0.0.1:${address.port}/#${token}`);
+      console.log(`令牌已写入 ${tokenFile}; 按 Ctrl+C 停止。`);
+    });
+  },
+
   status: (cfg) => {
     const { run } = require('../lib/sh');
     console.log(`节点: ${cfg.node}(globals ${cfg.globalsRole})  内存默认上限: ${cfg.memoryMax}`);
@@ -254,6 +274,7 @@ const cmds = {
   },
 };
 cmds.sessions.noBoxConfig = true; // sessions 用独立配置,不要求盒 env 存在
+cmds.serve.noBoxConfig = true;
 
 const [cmd, ...rest] = process.argv.slice(2);
 if (!cmd || cmd === '--help' || cmd === '-h' || !cmds[cmd]) {
