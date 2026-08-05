@@ -92,12 +92,12 @@ ssh -t my-second-node ag-box attach myproj   # 接入,agent 里 --resume 续上�
 
 把个人机/服务器上**未 track 成盒**的本地项目的 claude 会话历史,加密同步到 R2,
 任一机器开的会话可在另一机器 `claude --resume` 续聊。与盒功能相互独立:
-不需要 bwrap/systemd,不需要盒配置,跨平台(Linux 已验证,Mac 待手动验收,Windows 实验性)。
+不需要 bwrap/systemd,不需要盒配置，支持 Linux、macOS 与 Windows。用户自行启动 agent；同步仅迁移项目关联的会话状态，不启动或控制 agent 进程。
 
 ### 配置(每台机器一次)
 
-1. 安装 rclone(个人机唯一外部依赖)。
-2. `cp env.sessions.example ~/.config/agentsync/env && chmod 600 ~/.config/agentsync/env`,填入
+1. 安装 Node.js 20+、restic 与 rclone；可先运行 `scripts/install.sh` 或 `scripts/install.ps1` 做本机检查。
+2. `cp env.sessions.example <agentsync-config-dir>/env`，填入
    R2 endpoint、桶名、S3 凭证与 `SESSIONS_CRYPT_PASSWORD`。
    - **强烈建议独立桶 + 独立 token**(R2 只能按桶授权;与盒同桶时,该凭证可覆盖/删除盒对象)。
    - **SESSIONS_CRYPT_PASSWORD 丢失即全部不可解密,务必离线备份**(与 RESTIC_PASSWORD 同等对待)。
@@ -109,10 +109,12 @@ ssh -t my-second-node ag-box attach myproj   # 接入,agent 里 --resume 续上�
     ag-box sessions pull [path]   # 拉他机命名空间会话,改写 cwd 落进本机 ~/.claude/projects/<slug>/
     ag-box sessions sync [path]   # push 后 pull
     ag-box sessions list          # 已登记项目 + 待合并冲突数
+    ag-box serve                  # 启动仅本机可访问的管理面板
 
 ### 已知限制(MVP)
 
-- 只同步 claude(codex/grok 留后);手动命令,无守护进程。
+- 会话适配器覆盖 Claude Code、Codex、Grok、OpenCode、Pi 与 oh-my-pi；只同步能确认属于当前项目的会话文件。格式未知、凭证或全局设置均跳过。
+- 同步是手动触发的，无守护进程；本地面板只编排 `sync`，不提供终端或任意命令执行。
 - 无删除传播:本地删除的会话不会删远端/他机。
 - 同一 session 双机并发续写:最后写胜(极罕见)。
 - memory 双机并发修改:远端版落 `<name>.<机器ID前8位>.conflict.md`,人工合并;MEMORY.md 属高频冲突点。
