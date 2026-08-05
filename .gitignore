@@ -1,5 +1,2 @@
-# 真实配置(在 /root/.config/box/,不入仓;防御性忽略仓内误建)
-env
-nodes
-node_modules/
-*.log
+.worktrees/
+.superpowers/
