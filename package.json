@@ -1,9 +1,21 @@
 {
   "name": "agent-box",
-  "version": "0.1.0",
+  "version": "0.2.0-rc.1",
   "description": "跨节点 AI coding agent 工作沙盒:bwrap 隔离 + Nix 环境 + restic→R2 迁移,可在多台机器间 park/up 续聊",
-  "bin": { "ag-box": "bin/ag-box" },
-  "scripts": { "test": "node --test test/" },
+  "bin": {
+    "ag-box": "bin/ag-box"
+  },
+  "scripts": {
+    "test": "node --test test/",
+    "build:win": "pkg --target node20-win-x64 --output dist/ag-box-win-x64.exe bin/ag-box",
+    "build:mac": "pkg --target node20-macos-x64,node20-macos-arm64 --output dist/ag-box-macos bin/ag-box"
+  },
+  "pkg": { "assets": ["web/**/*", "exclude.txt"] },
   "license": "MIT",
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^5.16.1"
+  }
 }

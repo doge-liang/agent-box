@@ -1,0 +1,33 @@
+name: prerelease
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            script: npm run build:win
+          - os: macos-latest
+            script: npm run build:mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci
+      - run: npm test
+      - run: ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with: { name: ${{ matrix.os }}, path: dist/* }
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - run: gh release create "${GITHUB_REF_NAME}" $(find dist -type f -print) --prerelease --title "${GITHUB_REF_NAME}" --notes "测试预发布：Windows/macOS 独立可执行文件。当前已验证 Claude 会话同步；其余 agent 适配器仍属测试功能。"
+        env: { GH_TOKEN: ${{ github.token }} }
