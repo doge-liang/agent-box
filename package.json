@@ -1,6 +1,6 @@
 {
   "name": "agent-box",
-  "version": "0.2.0-rc.2",
+  "version": "0.2.0-rc.3",
   "description": "跨节点 AI coding agent 工作沙盒:bwrap 隔离 + Nix 环境 + restic→R2 迁移,可在多台机器间 park/up 续聊",
   "bin": {
     "ag-box": "bin/ag-box"
