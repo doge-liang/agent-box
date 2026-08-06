@@ -254,8 +254,15 @@ const cmds = {
     const { server } = createServer({ core: createSyncCore(), token });
     server.listen(0, '127.0.0.1', () => {
       const address = server.address();
-      console.log(`本地面板: http://127.0.0.1:${address.port}/#${token}`);
+      const url = `http://127.0.0.1:${address.port}/#${token}`;
+      console.log(`本地面板: ${url}`);
       console.log(`令牌已写入 ${tokenFile}; 按 Ctrl+C 停止。`);
+      if (process.platform === 'win32') {
+        // Double-clicking the portable .exe should start the local panel rather
+        // than flash a console window and exit.  The URL only contains the
+        // per-process panel token and never storage credentials.
+        require('child_process').spawn('cmd.exe', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
+      }
     });
   },
 
@@ -276,10 +283,13 @@ const cmds = {
 cmds.sessions.noBoxConfig = true; // sessions 用独立配置,不要求盒 env 存在
 cmds.serve.noBoxConfig = true;
 
-const [cmd, ...rest] = process.argv.slice(2);
-if (!cmd || cmd === '--help' || cmd === '-h' || !cmds[cmd]) {
+let [cmd, ...rest] = process.argv.slice(2);
+// Portable desktop behaviour: no argument opens the local management panel.
+// Explicit --help remains the discoverable CLI entry point.
+if (!cmd) cmd = 'serve';
+if (cmd === '--help' || cmd === '-h' || !cmds[cmd]) {
   console.log(USAGE);
-  process.exit(cmd && cmd !== '--help' && cmd !== '-h' ? 1 : 0);
+  process.exit(cmd !== '--help' && cmd !== '-h' ? 1 : 0);
 }
 try {
   const handler = cmds[cmd];
